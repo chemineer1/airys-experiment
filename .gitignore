@@ -1,0 +1,6 @@
+/target/
+/captures/
+/dist/
+/.tools/
+/_site/
+__pycache__/

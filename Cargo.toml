@@ -1,0 +1,46 @@
+[package]
+name = "airys-experiment"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "An interactive 2+1 dimensional spacetime model of Airy's water telescope"
+
+[features]
+default = ["native"]
+app = ["dep:bevy", "dep:bevy_egui"]
+native = ["app", "bevy/multi_threaded", "bevy/x11", "bevy/wayland", "bevy/png"]
+web = ["app", "bevy/webgl2", "dep:web-sys"]
+
+[dependencies]
+# Window/canvas, two GPU-rendered 3D views, line geometry, and input.
+bevy = { version = "=0.19.1", optional = true, default-features = false, features = [
+    "std", "async_executor", "bevy_asset", "bevy_log", "bevy_winit",
+    "bevy_render", "bevy_core_pipeline", "bevy_camera", "bevy_gizmos_render", "bevy_pbr",
+    "keyboard", "mouse",
+] }
+# Immediate-mode controls, text, and opening the explainer's cited sources.
+bevy_egui = { version = "=0.42.0", optional = true, default-features = false, features = ["render", "default_fonts", "open_url"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Already used by Bevy; opens source links without exposing the app's window.
+web-sys = { version = "=0.3.105", optional = true, features = ["Window"] }
+
+[[bin]]
+name = "airys-experiment"
+path = "src/main.rs"
+required-features = ["app"]
+
+[profile.dev]
+opt-level = 1
+debug = 0
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.web]
+inherits = "release"
+# Favor download size while retaining optimized rendering code.
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

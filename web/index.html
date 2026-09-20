@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b1016">
+  <meta name="referrer" content="no-referrer">
+  <title>Airy's experiment</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body, main { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #0b1016; }
+    body { color: #e0e8ef; font: 15px system-ui, sans-serif; }
+    canvas { display: block; width: 100%; height: 100%; outline: none; touch-action: none; }
+    #status { position: fixed; inset: 0; display: grid; place-content: center; gap: 16px; padding: 24px; text-align: center; background: #0b1016; }
+    #status p { max-width: 34ch; margin: 0; line-height: 1.5; }
+    #progress { width: min(280px, 75vw); height: 5px; margin: auto; accent-color: #8cceea; }
+    #retry { justify-self: center; padding: 9px 18px; border: 1px solid #415468; border-radius: 6px; background: #1b2836; color: inherit; font: inherit; cursor: pointer; }
+    #retry:focus-visible { outline: 2px solid #8cceea; outline-offset: 3px; }
+    #status[hidden] { display: none; }
+    noscript { position: fixed; top: 40%; width: 100%; text-align: center; }
+  </style>
+</head>
+<body>
+  <main><canvas id="simulation" aria-label="Interactive Airy experiment: telescope and star root frames" tabindex="0" aria-busy="true"></canvas></main>
+  <div id="status">
+    <p id="status-message" role="status" aria-live="polite">Loading simulation…</p>
+    <progress id="progress" max="100" aria-label="Simulation download"></progress>
+    <button id="retry" type="button" hidden>Retry</button>
+  </div>
+  <noscript>Enable JavaScript to run the Rust simulation.</noscript>
+  <script type="module">
+    const status = document.querySelector('#status');
+    const message = document.querySelector('#status-message');
+    const progress = document.querySelector('#progress');
+    const retry = document.querySelector('#retry');
+    const canvas = document.querySelector('#simulation');
+    // Fetch streams contain decoded bytes. Content-Length may instead describe
+    // gzip transfer bytes, so use the exact build size for truthful progress.
+    const wasmBytes = __WASM_BYTES__;
+    let phase = 'download';
+    let failedAlready = false;
+    const download = new AbortController();
+    retry.addEventListener('click', () => location.reload());
+    function failed(error) {
+      console.error(error);
+      if (failedAlready) return;
+      failedAlready = true;
+      download.abort();
+      status.hidden = false;
+      progress.hidden = true;
+      retry.hidden = false;
+      canvas.setAttribute('aria-busy', 'false');
+      message.textContent = error?.userMessage ?? (phase === 'download'
+        ? 'The simulation could not be downloaded. Check your connection, then retry.'
+        : phase === 'running'
+          ? 'The simulation stopped unexpectedly. Retry to restart it.'
+          : 'The simulation could not start. Try reloading or a browser with WebGL 2 and hardware acceleration enabled.');
+    }
+    function loadError(userMessage) {
+      return Object.assign(new Error(userMessage), { userMessage });
+    }
+    window.addEventListener('error', event => failed(event.error ?? event.message));
+    window.addEventListener('unhandledrejection', event => failed(event.reason));
+    canvas.addEventListener('webglcontextlost', () => {
+      failed(loadError('Graphics context lost. Retry to restart the simulation.'));
+    });
+    try {
+      if (typeof WebAssembly !== 'object' || !WebAssembly || typeof WebGL2RenderingContext === 'undefined') {
+        throw loadError('This browser needs WebAssembly and WebGL 2 to run the simulation. Try an up-to-date browser.');
+      }
+      const [{ default: init }, response] = await Promise.all([
+        import('./airy.js?v=__BUILD_VERSION__'),
+        fetch('./airy_bg.wasm?v=__BUILD_VERSION__', { signal: download.signal }),
+      ]);
+      if (!response.ok) {
+        throw loadError(`The simulation download failed (HTTP ${response.status}). Retry in a moment.`);
+      }
+      if (!response.body) {
+        throw loadError('This browser could not stream the simulation. Try an up-to-date browser.');
+      }
+      const reader = response.body.getReader();
+      let received = 0;
+      let lastPercent = -1;
+      let cancelled = false;
+      const stream = new ReadableStream({
+        async pull(controller) {
+          try {
+            const { done, value } = await reader.read();
+            if (cancelled) return;
+            if (failedAlready) {
+              controller.error(new Error('Loading cancelled'));
+              return;
+            }
+            if (done) {
+              if (received !== wasmBytes) throw loadError('The simulation download was incomplete or outdated. Retry to download it again.');
+              phase = 'start';
+              progress.hidden = true;
+              message.textContent = 'Starting simulation…';
+              controller.close();
+              return;
+            }
+            received += value.byteLength;
+            if (received > wasmBytes) throw loadError('The simulation files are out of date. Retry to download the latest version.');
+            const percent = Math.floor(received / wasmBytes * 100);
+            if (percent !== lastPercent) {
+              progress.value = percent;
+              // Keep screen-reader announcements to broad milestones.
+              if (Math.floor(percent / 10) !== Math.floor(lastPercent / 10)) {
+                message.textContent = `Downloading simulation · ${Math.floor(percent / 10) * 10}%`;
+              }
+              lastPercent = percent;
+            }
+            controller.enqueue(value);
+          } catch (error) {
+            controller.error(error);
+            failed(error);
+          }
+        },
+        cancel(reason) {
+          // A compiler rejection can cancel while a network read is pending.
+          // Let that rejection describe the failure, not a false size mismatch.
+          cancelled = true;
+          return reader.cancel(reason);
+        },
+      });
+      // Preserve streaming compilation; never buffer another full Wasm copy.
+      await init({ module_or_path: new Response(stream, { headers: { 'Content-Type': 'application/wasm' } }) });
+      if (!failedAlready) {
+        status.hidden = true;
+        phase = 'running';
+        canvas.setAttribute('aria-busy', 'false');
+        canvas.focus();
+      }
+    } catch (error) {
+      if (typeof WebAssembly === 'object' && WebAssembly && (error instanceof WebAssembly.CompileError || error instanceof WebAssembly.LinkError)) phase = 'start';
+      failed(error);
+    }
+  </script>
+</body>
+</html>
